@@ -184,8 +184,8 @@ See [CHANGELOG.md](CHANGELOG.md) for a detailed list of changes.
 ## Support
 
 - 📧 Email: [amankanaa@gmail.com](mailto:amankanaa@gmail.com)
-- 🐛 Issues: [GitHub Issues](https://github.com/yourusername/flutter_advanced_cropper/issues)
-- 💬 Discussions: [GitHub Discussions](https://github.com/yourusername/flutter_advanced_cropper/discussions)
+- 🐛 Issues: [GitHub Issues](https://github.com/roohaani786/flutter_advanced_Cropper/issues)
+- 💬 Contribute: [GitHub PR's](https://github.com/roohaani786/flutter_advanced_Cropper/pulls)
 
 ## Acknowledgments
 

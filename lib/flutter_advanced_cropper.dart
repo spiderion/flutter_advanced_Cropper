@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
@@ -5,9 +6,12 @@ import 'dart:ui' as ui;
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:image/image.dart' as img;
 import 'package:path_provider/path_provider.dart';
 
+import 'adjustment_panel.dart';
 import 'crop_overlay_painter.dart';
+import 'models.dart';
 
 class ImageCropperScreen extends StatefulWidget {
   final File imageFile;
@@ -19,7 +23,6 @@ class ImageCropperScreen extends StatefulWidget {
 
 class _ImageCropperScreenState extends State<ImageCropperScreen>
     with TickerProviderStateMixin {
-  bool _isHighResLoaded = false;
   Rect? cropRect;
   bool _cropRectInitialized = false;
   final double _handleSize = 32.0; // Visual handle size
@@ -28,6 +31,10 @@ class _ImageCropperScreenState extends State<ImageCropperScreen>
   final double _minCropSize = 80.0;
   double _displayWidth = 0.0;
   double _displayHeight = 0.0;
+  Uint8List? _filteredImageBytes;
+
+  // PhotographicStyle _selectedStyle = PhotographicStyle.original;
+  Uint8List? _originalImageBytes;
 
   // Added for loading indicator
   bool _isProcessing = false;
@@ -43,21 +50,111 @@ class _ImageCropperScreenState extends State<ImageCropperScreen>
 
   // Controls state
   double _rotation = 0.0;
+
+  Timer? _debounce;
   // Removed: _isFreeform and _aspectRatios variables
 
   // Animation controllers for smooth handle feedback
   late AnimationController _handleAnimationController;
   late Animation<double> _handleScaleAnimation;
-  int _activeHandle = -1; // -1: none, 0: TL, 1: TR, 2: BL, 3: BR
+  int _activeHandle = -1;
+  bool _useFilteredImage = false; // -1: none, 0: TL, 1: TR, 2: BL, 3: BR
 
   // Crop interaction state
   bool _isDraggingCrop = false;
   Offset _dragStartPoint = Offset.zero;
   Rect _dragStartRect = Rect.zero;
 
+  ImageAdjustmentValues _adjustments = ImageAdjustmentValues();
+  bool showAdjustPanel = false;
+
+  Future<void> _initializeImageBytes() async {
+    try {
+      final bytes = await widget.imageFile.readAsBytes();
+      if (mounted) {
+        setState(() {
+          _originalImageBytes = bytes;
+          _useFilteredImage = false; // Initially using original
+        });
+      }
+    } catch (e) {
+      debugPrint("Error initializing image bytes: $e");
+    }
+  }
+
+  void _onAdjustmentsChanged(ImageAdjustmentValues newAdjustments) {
+    if (_debounce?.isActive ?? false) _debounce!.cancel();
+    _debounce = Timer(const Duration(milliseconds: 100), () {
+      setState(() {
+        _adjustments = newAdjustments;
+      });
+      _applyAdjustmentsToImage(newAdjustments);
+    });
+  }
+
+  void _applyAdjustmentsToImage(ImageAdjustmentValues adjustments) async {
+    final originalBytes = await widget.imageFile.readAsBytes();
+
+    final img.Image? rawImage = img.decodeImage(originalBytes);
+    if (rawImage == null) return;
+
+    img.Image adjustedImage = img.adjustColor(
+      rawImage,
+      brightness: adjustments.brightness, // -1 to 1
+      contrast: adjustments.contrast, // 0 to 2
+      saturation: adjustments.saturation, // 0 to 2
+      exposure: adjustments.exposure, // simulate via brightness/contrast
+    );
+
+    final newBytes = Uint8List.fromList(img.encodePng(adjustedImage));
+
+    setState(() {
+      _filteredImageBytes = newBytes;
+      _useFilteredImage = true;
+    });
+  }
+
+  void _showAdjustPanel() {
+    // Create animation controller for the bottom sheet
+    final controller = AnimationController(
+      duration: const Duration(milliseconds: 300),
+      vsync: this,
+    );
+
+    final animation = CurvedAnimation(
+      parent: controller,
+      curve: Curves.easeInOut,
+    );
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) {
+        controller.forward(); // Start animation
+
+        return AdjustPanel(
+          adjustments: _adjustments,
+          onAdjustmentsChanged: _onAdjustmentsChanged,
+          onReset: () {
+            print('Adjustments reset via bottom sheet');
+            setState(() {
+              // _previewImageBytes = _originalImageBytes;
+            });
+          },
+          animation: animation,
+        );
+      },
+    ).whenComplete(() {
+      controller.dispose();
+    });
+  }
+
   @override
   void initState() {
     super.initState();
+
+    _initializeImageBytes();
     // Reset state first to ensure clean initialization for the current imageFile
     _resetImageAndCropState();
     // Load image dimensions (this will then trigger _calculateImageDisplayDimensions)
@@ -95,21 +192,21 @@ class _ImageCropperScreenState extends State<ImageCropperScreen>
 
   // Resets all relevant state variables for a fresh image load
   void _resetImageAndCropState() {
-    _isHighResLoaded = false;
-    cropRect = null; // Forces recalculation of initial cropRect
-    _cropRectInitialized = false; // Allows initial cropRect to be set again
+    cropRect = null;
+    _cropRectInitialized = false;
     _originalImageWidth = 0;
     _originalImageHeight = 0;
-    _imageDimensionsLoaded = false; // Forces _loadImageDimensions to run
+    _imageDimensionsLoaded = false;
     _imageDisplayWidth = 0.0;
     _imageDisplayHeight = 0.0;
     _imageOffset = Offset.zero;
-    _rotation = 0.0; // Reset rotation for new image
+    _rotation = 0.0;
     _isDraggingCrop = false;
     _activeHandle = -1;
     _dragStartPoint = Offset.zero;
     _dragStartRect = Rect.zero;
-    // No setState here, as it will be called by _loadImageDimensions or LayoutBuilder
+    _originalImageBytes = null;
+    _useFilteredImage = false; // Reset filter state
   }
 
   Future<void> _loadImageDimensions() async {
@@ -298,12 +395,10 @@ class _ImageCropperScreenState extends State<ImageCropperScreen>
       return;
     }
 
-    // --- FIX: Defer setState to avoid "called during build" error ---
-    // This ensures the current build frame completes before a new build is triggered.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
         setState(() {
-          _isProcessing = true; // Show loading indicator
+          _isProcessing = true;
         });
       }
     });
@@ -313,7 +408,8 @@ class _ImageCropperScreenState extends State<ImageCropperScreen>
     File? outFile;
 
     try {
-      final bytes = await widget.imageFile.readAsBytes();
+      // Use filtered bytes if available, otherwise use original file
+      final bytes = _originalImageBytes ?? await widget.imageFile.readAsBytes();
       final codec = await ui.instantiateImageCodec(bytes);
       final frame = await codec.getNextFrame();
       originalImage = frame.image;
@@ -392,10 +488,14 @@ class _ImageCropperScreenState extends State<ImageCropperScreen>
       final picture = recorder.endRecording();
       croppedImage = await picture.toImage(outputWidth, outputHeight);
 
+      // Convert to bytes for final output
       final byteData = await croppedImage.toByteData(
         format: ui.ImageByteFormat.png,
       );
-      final bytesToSave = byteData!.buffer.asUint8List();
+      if (byteData == null) {
+        throw Exception("Failed to convert cropped image to byte data.");
+      }
+      final bytesToSave = byteData.buffer.asUint8List();
 
       final directory = await getTemporaryDirectory();
       final timestamp = DateTime.now().millisecondsSinceEpoch;
@@ -416,8 +516,6 @@ class _ImageCropperScreenState extends State<ImageCropperScreen>
     } finally {
       originalImage?.dispose();
       croppedImage?.dispose();
-      // Ensure processing state is reset in the next frame as well,
-      // in case of errors that might not trigger a rebuild immediately.
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) {
           setState(() {
@@ -479,63 +577,31 @@ class _ImageCropperScreenState extends State<ImageCropperScreen>
 
           return Stack(
             children: [
-              // Display image if dimensions are loaded and calculated
-              // This ensures at least the low-res version shows immediately
               if (_imageDimensionsLoaded && _imageDisplayWidth > 0)
                 Positioned.fill(
                   child: Transform.rotate(
                     angle: _rotation,
                     child: Stack(
                       children: [
-                        // Low-res preview (always visible until high-res loads/fades in)
+                        // Always show the current image state (original or filtered)
                         Positioned(
                           left: _imageOffset.dx,
                           top: _imageOffset.dy,
-                          child: Image.file(
-                            widget.imageFile,
-                            width: _imageDisplayWidth,
-                            height: _imageDisplayHeight,
-                            fit: BoxFit.fill,
-                            cacheWidth: 800, // Optimize cache size for low-res
-                            cacheHeight: 800,
-                            filterQuality: FilterQuality.low,
-                          ),
-                        ),
-                        // High-res overlay (fades in once loaded)
-                        Positioned(
-                          left: _imageOffset.dx,
-                          top: _imageOffset.dy,
-                          child: AnimatedOpacity(
-                            opacity: _isHighResLoaded ? 1.0 : 0.0,
-                            duration: const Duration(milliseconds: 300),
-                            child: Image.file(
-                              widget.imageFile,
-                              width: _imageDisplayWidth,
-                              height: _imageDisplayHeight,
-                              fit: BoxFit.fill,
-                              filterQuality: FilterQuality.medium,
-                              frameBuilder: (
-                                context,
-                                child,
-                                frame,
-                                wasSynchronouslyLoaded,
-                              ) {
-                                if (frame != null && !_isHighResLoaded) {
-                                  // This callback is called after the first frame of the image is available
-                                  WidgetsBinding.instance.addPostFrameCallback((
-                                    _,
-                                  ) {
-                                    if (mounted) {
-                                      setState(() {
-                                        _isHighResLoaded = true;
-                                      });
-                                    }
-                                  });
-                                }
-                                return child;
-                              },
-                            ),
-                          ),
+                          child:
+                              _useFilteredImage && _filteredImageBytes != null
+                                  ? Image.memory(
+                                    _filteredImageBytes!,
+                                    width: _imageDisplayWidth,
+                                    height: _imageDisplayHeight,
+                                    fit: BoxFit.fill,
+                                    key: ValueKey(_filteredImageBytes.hashCode),
+                                  )
+                                  : Image.file(
+                                    widget.imageFile,
+                                    width: _imageDisplayWidth,
+                                    height: _imageDisplayHeight,
+                                    fit: BoxFit.fill,
+                                  ),
                         ),
                       ],
                     ),
@@ -652,7 +718,12 @@ class _ImageCropperScreenState extends State<ImageCropperScreen>
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceEvenly, // Adjusted spacing
         children: [
-          // Removed Freeform/Aspect Ratio button
+          _buildGlassButton(
+            icon: Icons.rotate_90_degrees_ccw,
+            label: "Adjust",
+            onPressed: _showAdjustPanel,
+          ),
+
           _buildGlassButton(
             icon: Icons.rotate_90_degrees_ccw,
             label: "Rotate",
