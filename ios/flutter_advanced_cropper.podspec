@@ -3,7 +3,7 @@
 # Run `pod lib lint android.podspec` to validate before publishing.
 #
 Pod::Spec.new do |s|
-  s.name             = 'android'
+  s.name             = 'flutter_advanced_cropper'
   s.version          = '0.0.1'
   s.summary          = 'A new Flutter plugin project.'
   s.description      = <<-DESC
